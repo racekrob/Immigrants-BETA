@@ -1837,7 +1837,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
         if (v != null) walk(v, ks);
       }
       if (bc) bc.postMessage(1);
-      setTimeout(notify, 0);
+      notify(); // jako Firebase: místní posluchači hned
     }
     window.__mockRead = read;
     const listeners = [];
@@ -3073,6 +3073,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     gref('meta').on('value', s => {
       const m = s.val(); if (!ON || !m) return;
       if (ON.host) {
+        ON.metaHost = m.host;
         if (m.host && m.host !== ON.uid) demote();
         return;
       }
@@ -3117,15 +3118,17 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   }
   async function takeOver() {
     const uid = ON.uid;
-    const r = await gref('meta').transaction(m => (m == null ? null : (m.status === 'abandoned' || m.hostOn === false) && m.host !== uid ? Object.assign({}, m, { host: uid, status: 'play', hostOn: true }) : undefined));
+    let prevHost = ON.hostUid;
+    const r = await gref('meta').transaction(m => { if (m == null) return null; if ((m.status === 'abandoned' || m.hostOn === false) && m.host !== uid) { prevHost = m.host; return Object.assign({}, m, { host: uid, status: 'play', hostOn: true }); } return undefined; });
     if (!r.committed || !r.snapshot.val() || r.snapshot.val().host !== uid) { toast('Hru už převzal někdo jiný, nebo se zakladatel vrátil.', 'minus'); hostBack(); return; }
     const seats = (await gref('seats').get()).val() || [];
     hostBack();
     if (ON.conf) G.conf = ON.conf;
     ['state', 'err', 'offer', 'conf', 'meta'].forEach(p => gref(p).off());
     useRemoteEngine(false);
-    ON.host = true; ON.gone = false; ON.seats = seats;
-    const old = seats.findIndex(st => st && st.uid === ON.hostUid);
+    ON.host = true; ON.gone = false; ON.seats = seats; ON.metaHost = uid;
+    // dřívější zakladatel (pozor: ON.hostUid už může ukazovat na nás)
+    const old = seats.findIndex(st => st && st.uid === prevHost && st.uid !== uid);
     hostListen();
     presence(`games/${ON.code}/meta/hostOn`);
     if (old >= 0 && pl(old) && pl(old).alive && !pl(old).away) metaAct('away', old);
@@ -3145,6 +3148,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   // ---------- hostitel ----------
   function commit(out) {
     if (!ON || !ON.host || !G) return;
+    if (ON.metaHost && ON.metaHost !== ON.uid) return; // hru mezitím převzal někdo jiný
     ON.seq++;
     const g2 = Object.assign({}, G); delete g2.log; delete g2.conf;
     const tail = (out || []).filter(e => e.text).map(e => ({ turn: G.turn, text: e.text }));
@@ -3275,7 +3279,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     const code = await newCode();
     const seats = cfg.ps.map((p, k) => ({ name: (p.name || '').trim() || (p.ai ? 'Počítač ' : 'Hráč ') + (k + 1), color: p.color, ai: !!p.ai, uid: k === hostSeat ? Net.uid : '' }));
     const conf = loadConf();
-    await Net.ref('games/' + code).set({ meta: { host: Net.uid, status: 'lobby', created: Date.now(), level: cfg.level, opts: cfg.opts }, seats, conf: JSON.stringify(conf) });
+    await Net.ref('games/' + code).update({ meta: { host: Net.uid, status: 'lobby', created: Date.now(), level: cfg.level, opts: cfg.opts }, seats, conf: JSON.stringify(conf), state: null, actions: null, offer: null, err: null });
     ON = { code, host: true, uid: Net.uid, mine: new Set([hostSeat]), seq: 0, seats };
     onlineSave();
     showLobby();
