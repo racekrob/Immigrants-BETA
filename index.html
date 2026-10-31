@@ -934,6 +934,27 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     g.pending = { type: 'start', p: g.cur };
     ev(g, out, { t: 'turn', p: g.cur });
     if (g.snb && !g.cards.snb) g.snb = null;
+    // hráč, který opustil online hru: jeden tah vynechá, při dalším jeho majetek propadne bance
+    if (p.away) {
+      if (!p.awaySkip) { p.awaySkip = 1; ev(g, out, { t: 'msg', text: `${p.name} není ve hře – tah vynechává.` }); endTurn(g, out); }
+      else { eliminate(g, out, g.cur, `${p.name} se do hry nevrátil – jeho majetek propadá bance.`); if (g.winner == null) endTurn(g, out); }
+    }
+  }
+  function setAway(g, i, on) {
+    const out = [], p = P(g, i);
+    if (!p || !p.alive) return { ok: false, out };
+    if (!on) { if (!p.away) return { ok: false, out }; p.away = false; p.awaySkip = 0; ev(g, out, { t: 'msg', text: `${p.name} se vrátil do hry.` }); return { ok: true, out }; }
+    if (p.away) return { ok: false, out };
+    p.away = true; p.awaySkip = 0;
+    ev(g, out, { t: 'msg', text: `${p.name} opustil hru. Nevrátí-li se do konce kola, jeho majetek propadne bance.` });
+    if (g.pending && g.pending.type === 'debt' && g.pending.p === i) {
+      eliminate(g, out, i, `${p.name} opustil hru s nesplaceným dluhem a končí.`); resumeAfterDebt(g, out);
+    } else if (g.cur === i && g.pending && g.pending.type !== 'over') {
+      p.awaySkip = 1;
+      ev(g, out, { t: 'msg', text: `${p.name} tah nedohraje, na tahu je další hráč.` });
+      endTurn(g, out);
+    }
+    return { ok: true, out };
   }
 
   function roll(g, i, n) {
@@ -1069,7 +1090,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   const API = {
     D, N, ADJ, FED, BC, COLORS, CARDS, LABELS, SH, DICE_FEE, CONF,
     chainFee, crossToll, blockedFor, profitMult, CHAIN_OF, _arriveBank: arriveBank,
-    newGame, moveOptions, roll, rerollChoice, chooseDir, buyChoice, cardActions, cardAct, placeSNB,
+    setAway, newGame, moveOptions, roll, rerollChoice, chooseDir, buyChoice, cardActions, cardAct, placeSNB,
     labelCheck, placeLabel, sellables, sell, debtSell, bankrupt, debtOf, tradeValid, doTrade, assetValue,
     ownedStates, hasCard, cardOwner, caliOwner, shareholderPct, cardPriceFor, tollMult, fmt, nodeState, bankStates,
   };
@@ -2104,7 +2125,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   }
   const LABEL_ICON = { double: '2×', special: '⚄', independent: '⛔' };
   function drawMarks() {
-    const g = $('#g-marks'); g.innerHTML = '';
+    const g = $('#g-marks'); if (!g) return; g.innerHTML = '';
     Object.keys(G.states).forEach(s => {
       const st = G.states[s];
       if (st.owner < 0) return;
@@ -2138,7 +2159,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     sizeOverlay();
   }
   function drawPawns() {
-    const g = $('#g-pawns'); g.innerHTML = '';
+    const g = $('#g-pawns'); if (!g) return; g.innerHTML = '';
     const at = {};
     G.players.forEach(p => { if (p.alive) (at[p.node] = at[p.node] || []).push(p.id); });
     Object.keys(at).forEach(n => {
@@ -2157,7 +2178,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     sizeOverlay();
   }
   function drawTrail() {
-    const g = $('#g-trail'); g.innerHTML = '';
+    const g = $('#g-trail'); if (!g) return; g.innerHTML = '';
     if (lastTrail.length < 2 || trailPlayer < 0) return;
     const c = COLOR[pl(trailPlayer).color];
     g.append(sv('polyline', { class: 'trail', points: lastTrail.map(n => px(n) + ',' + py(n)).join(' '), stroke: '#14203b', 'stroke-width': 11, opacity: .35 }));
@@ -2165,7 +2186,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     sizeOverlay();
   }
   function drawOptions() {
-    const g = $('#g-opts'); g.innerHTML = '';
+    const g = $('#g-opts'); if (!g) return; g.innerHTML = '';
     const pd = G.pending;
     if (!pd || pd.type !== 'dir' || !isMine(pd.p) || busy) return;
     pd.options.forEach((o, k) => {
@@ -2188,7 +2209,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
       const debt = E.debtOf(G, p.id);
       const el = h('div', { class: 'chip' + (p.id === G.cur ? ' cur' : '') + (p.alive ? '' : ' dead') + (debt ? ' debt' : ''), 'data-p': p.id },
         h('span', { html: starSVG(p.color, 26) }),
-        h('span', { class: 'meta' }, h('span', { class: 'nm' }, p.name + (p.ai ? ' ⚙' : '')), h('span', { class: 'cs num' }, debt ? 'dluh ' + fmt(debt) : fmt(p.cash))));
+        h('span', { class: 'meta' }, h('span', { class: 'nm' }, p.name + (p.away ? ' (pryč)' : p.ai ? ' ⚙' : '')), h('span', { class: 'cs num' }, debt ? 'dluh ' + fmt(debt) : fmt(p.cash))));
       el.addEventListener('click', () => playerInfo(p.id));
       c.append(el);
     });
@@ -2262,7 +2283,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     if (isHuman(i) && !isMine(i)) {
       P.append(header(i, `Na tahu: ${pl(i).name}`, 'Hraje na svém zařízení'), h('div', { class: 'thinking' }, h('div', { class: 'spinner' }), h('span', null, describePending(pd))));
       const st = ON && ON.seats && ON.seats[i];
-      if (ON && ON.host && st && st.on === false) P.append(h('p', { class: 'note' }, `${pl(i).name} je odpojen.`), h('div', { class: 'row' }, h('button', { class: 'btn soft', onclick: () => confirmBox(`Má za hráče ${pl(i).name} dál hrát počítač? Po návratu se hráč do hry zase vrátí.`, 'Hrát počítačem', () => metaAct('toAI', i)) }, 'Hrát za něj počítačem')));
+      if (st && st.on === false) P.append(h('p', { class: 'note' }, `${pl(i).name} je odpojen. Nevrátí-li se do 12 s, tah vynechá.`));
       return;
     }
     if (!isHuman(i)) {
@@ -2829,13 +2850,6 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
       card.innerHTML = '';
       if (BETA) card.append(h('div', { class: 'betabar' }, h('b', null, 'BETA'), h('span', null, 'Zkušební verze pro ladění cen. Hry a nastavení se ukládají odděleně od originálu.')));
       card.append(h('h1', { class: 'sr-only' }, 'Immigrants to the United States of America'), h('p', { class: 'lead' }, 'Desková hra pro 2–7 hráčů na jednom zařízení. Kupujte státy, vybírejte mýtné a dojeďte do banky.'));
-      if (ON && ON.gone) {
-        card.append(h('div', { class: 'gonebox' }, h('b', null, ON.goneLeft ? `Zakladatel opustil online hru ${ON.code}.` : `Zakladatel online hry ${ON.code} je odpojen.`),
-          h('p', null, 'Hru můžete převzít – vaše zařízení ji pak bude řídit a za zakladatele bude hrát počítač, dokud se nevrátí.'),
-          h('button', { class: 'btn red big', onclick: () => takeOver() }, 'Převzít hru'),
-          !ON.goneLeft ? h('button', { class: 'btn soft', onclick: () => { ON.gone = false; startGame(ON.lastG); } }, 'Počkat na zakladatele') : null,
-          h('button', { class: 'btn ghost', onclick: () => { quitOnline(); showSetup(); } }, 'Opustit online hru')));
-      }
       if (saved && saved.pending && saved.pending.type !== 'over') {
         card.append(h('button', { class: 'btn red big', onclick: () => startGame(saved) }, h('span', null, 'Pokračovat v rozehrané hře', h('small', null, `Kolo ${saved.turn} · ${saved.players.filter(p => p.alive).map(p => p.name).join(', ')}`))));
         card.append(h('div', { class: 'sec' }, 'nebo nová hra'));
@@ -3017,8 +3031,8 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   // akce mimo engine (řídí je hostitel, offline se provedou hned)
   const META = {
     tradeBlock(g, a, b) { g.tradeBlock = g.tradeBlock || {}; g.tradeBlock[tkey(a, b)] = g.turn; return { ok: true, out: [] }; },
-    toAI(g, i) { const p = g.players[i]; if (!p || p.ai) return { ok: false }; p.ai = true; p.level = (ON && ON.level) || 4; return { ok: true, out: [{ t: 'msg', text: `Za hráče ${p.name} teď hraje počítač.` }] }; },
-    reclaim(g, i) { const p = g.players[i]; if (!p || !p.ai) return { ok: false }; p.ai = false; return { ok: true, out: [{ t: 'msg', text: `${p.name} se vrátil do hry.` }] }; },
+    away(g, i) { return E.setAway(g, i, true); },
+    reclaim(g, i) { const p = g.players[i]; if (!p) return { ok: false }; if (p.ai && !p.away) { p.ai = false; return { ok: true, out: [{ t: 'msg', text: `${p.name} se vrátil do hry.` }] }; } return E.setAway(g, i, false); },
   };
   function metaAct(fn, ...args) {
     if (ON && !ON.host) { sendAction(fn, args, true); return; }
@@ -3049,9 +3063,11 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   }
   function quitOnline() {
     if (!ON) return;
-    if (ON.host) gref('meta/status').set('abandoned');
-    else { const k = [...ON.mine][0]; if (G && pl(k) && !pl(k).ai) sendAction('toAI', [k], true); gref('seats/' + k + '/on').set(false); }
-    leaveOnline(true);
+    const k = [...ON.mine][0];
+    if (ON.host) { gref('meta').update({ status: 'abandoned', hostOn: false }); }
+    else if (G && pl(k) && pl(k).alive && !pl(k).away) sendAction('away', [k], true);
+    gref('seats/' + k + '/on').set(false);
+    leaveOnline(false);
   }
   function watchHost() {
     gref('meta').on('value', s => {
@@ -3060,34 +3076,60 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
         if (m.host && m.host !== ON.uid) demote();
         return;
       }
-      if (m.host !== ON.hostUid) { ON.hostUid = m.host; ON.gone = false; clearTimeout(ON.goneT); }
+      if (m.host !== ON.hostUid) { ON.hostUid = m.host; hostBack(); }
       if (m.status === 'cancel' && !G) { leaveOnline(true); alertBox('Zakladatel hru zrušil.'); showSetup(); return; }
-      if (!G || ON.gone) return;
+      if (!G) return;
       if (m.status === 'abandoned') hostGone(true);
-      else if (m.hostOn === false) { clearTimeout(ON.goneT); ON.goneT = setTimeout(() => hostGone(false), 12000); }
-      else clearTimeout(ON.goneT);
+      else if (m.hostOn === false) { if (!ON.gone) { clearTimeout(ON.goneT); ON.goneT = setTimeout(() => hostGone(false), 12000); } }
+      else { clearTimeout(ON.goneT); if (ON.gone) hostBack(); }
     });
+  }
+  // další připojený hráč v pořadí po zakladateli
+  function nextCandidate() {
+    const seats = ON.seats || [], n = seats.length;
+    const hs = seats.findIndex(st => st && st.uid === ON.hostUid);
+    for (let k = 1; k <= n; k++) {
+      const j = ((hs < 0 ? 0 : hs) + k) % n, st = seats[j], p = G && G.players[j];
+      if (st && st.uid && st.uid !== ON.hostUid && !st.ai && p && p.alive && !p.ai && !p.away && st.on !== false) return j;
+    }
+    return -1;
   }
   function hostGone(left) {
     if (!ON || ON.host || ON.gone || !G) return;
-    ON.gone = true; ON.goneLeft = left; ON.lastG = G;
-    showSetup();
+    ON.gone = true; ON.goneLeft = left;
+    offerTakeover(false);
+    clearTimeout(ON.takeT); ON.takeT = setTimeout(() => offerTakeover(true), 30000);
+  }
+  function hostBack() {
+    if (!ON) return;
+    ON.gone = false; clearTimeout(ON.takeT); clearTimeout(ON.goneT);
+    if (ON.takeSheet) { const t = ON.takeSheet; ON.takeSheet = null; t.close(); }
+  }
+  function offerTakeover(all) {
+    if (!ON || !ON.gone || ON.host || !G) return;
+    const me = [...ON.mine][0], cand = nextCandidate();
+    if (!all && cand !== me) { if (cand >= 0) toast(`Zakladatel opustil hru. Hru převezme ${pl(cand).name}…`, '', 4500); else offerTakeover(true); return; }
+    if (ON.takeSheet) return;
+    ON.takeSheet = sheet('Zakladatel opustil hru', (b, close) => {
+      b.append(h('p', { style: 'margin:0' }, ON.goneLeft ? 'Zakladatel hru opustil. ' : 'Zakladatel je odpojen. ', 'Převezměte hru, ať může pokračovat – vaše zařízení ji pak bude řídit. Zakladatel svůj tah nedohraje; nevrátí-li se do konce kola, jeho majetek propadne bance.'),
+        h('button', { class: 'btn red big', onclick: () => { close(); takeOver(); } }, `Převzít hru: ${ON.code}`));
+    }, () => { if (ON) ON.takeSheet = null; });
   }
   async function takeOver() {
     const uid = ON.uid;
     const r = await gref('meta').transaction(m => (m == null ? null : (m.status === 'abandoned' || m.hostOn === false) && m.host !== uid ? Object.assign({}, m, { host: uid, status: 'play', hostOn: true }) : undefined));
-    if (!r.committed || !r.snapshot.val() || r.snapshot.val().host !== uid) { toast('Hru už převzal někdo jiný, nebo se zakladatel vrátil.', 'minus'); ON.gone = false; startGame(ON.lastG); return; }
+    if (!r.committed || !r.snapshot.val() || r.snapshot.val().host !== uid) { toast('Hru už převzal někdo jiný, nebo se zakladatel vrátil.', 'minus'); hostBack(); return; }
     const seats = (await gref('seats').get()).val() || [];
-    const g = ON.lastG; if (ON.conf) g.conf = ON.conf;
+    hostBack();
+    if (ON.conf) G.conf = ON.conf;
     ['state', 'err', 'offer', 'conf', 'meta'].forEach(p => gref(p).off());
     useRemoteEngine(false);
     ON.host = true; ON.gone = false; ON.seats = seats;
     const old = seats.findIndex(st => st && st.uid === ON.hostUid);
     hostListen();
     presence(`games/${ON.code}/meta/hostOn`);
-    startGame(g);
-    if (old >= 0 && pl(old) && !pl(old).ai) metaAct('toAI', old);
-    else commit([]);
+    if (old >= 0 && pl(old) && pl(old).alive && !pl(old).away) metaAct('away', old);
+    else { commit([]); refresh(); }
     toast('Převzal jste hru – vaše zařízení ji teď řídí.', 'plus', 4000);
   }
   function demote() {
@@ -3098,7 +3140,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     useRemoteEngine(true);
     clientListen();
     toast('Hru mezitím převzal jiný hráč. Pokračujete jako připojený hráč.', '', 4500);
-    const k = [...ON.mine][0]; if (G && pl(k) && pl(k).ai) metaAct('reclaim', k);
+    const k = [...ON.mine][0]; if (G && pl(k) && pl(k).alive && (pl(k).ai || pl(k).away)) metaAct('reclaim', k);
   }
   // ---------- hostitel ----------
   function commit(out) {
@@ -3112,10 +3154,20 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   }
   function hostListen() {
     ON.queue = [];
-    gref('seats').on('value', s => { ON.seats = s.val() || []; });
+    gref('seats').on('value', s => { ON.seats = s.val() || []; watchSeats(); });
     gref('actions').on('child_added', s => { ON.queue.push(Object.assign({ key: s.key }, s.val())); hostPump(); });
     gref('offer').on('value', s => onOffer(s.val()));
     watchHost();
+  }
+  function watchSeats() {
+    if (!ON || !ON.host || !G) return;
+    ON.offT = ON.offT || {};
+    (ON.seats || []).forEach((st, k) => {
+      if (!st || ON.mine.has(k) || st.ai || !st.uid || !pl(k)) return;
+      if (st.on === false && pl(k).alive && !pl(k).away && !pl(k).ai) {
+        if (!ON.offT[k]) ON.offT[k] = setTimeout(() => { if (!ON || !ON.host) return; ON.offT[k] = null; const s2 = (ON.seats || [])[k]; if (s2 && s2.on === false && pl(k).alive && !pl(k).away) metaAct('away', k); }, 12000);
+      } else if (st.on !== false) { clearTimeout(ON.offT[k]); ON.offT[k] = null; }
+    });
   }
   async function hostPump() {
     if (!ON || !ON.host || busy || ON.pumping || !G) return;
@@ -3154,6 +3206,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     ON.errInit = false;
     gref('err').on('value', s => { const v = s.val(); if (!ON.errInit) { ON.errInit = true; return; } if (v && ON && ON.mine.has(v.seat)) { ON.wait = false; toast(v.text, 'minus'); if (G) renderPanel(); } });
     gref('offer').on('value', s => onOffer(s.val()));
+    gref('seats').on('value', s => { ON.seats = s.val() || []; });
     watchHost();
     presence(`games/${ON.code}/seats/${[...ON.mine][0]}/on`);
   }
@@ -3175,7 +3228,8 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
           if (!ON.conf) { try { ON.conf = JSON.parse((await gref('conf').get()).val()); } catch (e) { /* nic */ } }
           if (ON.conf) g.conf = ON.conf;
           startGame(g);
-          const k = [...ON.mine][0]; if (G.players[k] && G.players[k].ai) metaAct('reclaim', k);
+          await new Promise(r => requestAnimationFrame(() => setTimeout(r, 50)));
+          const k = [...ON.mine][0]; if (G.players[k] && G.players[k].alive && (G.players[k].ai || G.players[k].away)) metaAct('reclaim', k);
           continue;
         }
         G = g;
