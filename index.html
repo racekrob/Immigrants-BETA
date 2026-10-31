@@ -313,6 +313,9 @@ label.fl { display: flex; flex-direction: column; gap: 4px; font-family: var(--f
 .lobbyrow .tag{font-size:13px}
 .codeinp{border:2px solid var(--paper-3);border-radius:8px;padding:10px;font:700 24px var(--f-body);letter-spacing:.2em;text-transform:uppercase;text-align:center}
 .codeinp.name{font:16px var(--f-body);letter-spacing:0;text-transform:none;text-align:left}
+.sheet .col{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+.gonebox{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:12px;background:#fff3d6;border:2px solid #e6b44a}
+.gonebox p{margin:0;font-size:15px}
 </style>
 </head>
 <body>
@@ -1706,7 +1709,46 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     return get >= give * 1.15 && E.tradeValid(g, t);
   }
 
-  const AI = { act, evalTrade, startActions, _dbg: { regimeRate, netStateValue, FED_LOOPS: () => FED_LOOPS, CROSS_LEN: () => CROSS_LEN, routeModel } };
+  // protinávrhy počítače: t.a = člověk, t.b = počítač; t.give dává člověk, t.get dává počítač
+  function counterTrade(g, t) {
+    const val = side => E.assetValue(g, side);
+    const cp = x => JSON.parse(JSON.stringify(x));
+    const up = v => Math.ceil(v / 500) * 500, down = v => Math.floor(v / 500) * 500;
+    const norm = t2 => { ['give', 'get'].forEach(k => { t2[k].states = t2[k].states || []; t2[k].cards = t2[k].cards || []; t2[k].cash = t2[k].cash || 0; }); return t2; };
+    // vyrovná peníze tak, aby počítač nabídku přijal a nebyl zbytečně přeplacen
+    function settle(t2) {
+      let d = val(t2.get) * 1.15 - val(t2.give);
+      if (d > 0) {
+        const cut = Math.min(t2.get.cash, up(d / 1.15)); t2.get.cash -= cut; d -= cut * 1.15;
+        if (d > 0) t2.give.cash += up(d);
+      } else if (d < 0) {
+        const back = Math.min(t2.give.cash, down(-d)); t2.give.cash -= back; d += back;
+        const extra = down(-d / 1.15); if (extra > 0) t2.get.cash += Math.min(extra, Math.max(0, g.players[t2.b].cash - t2.get.cash));
+      }
+      const some = x => x.states.length || x.cards.length || x.cash > 0;
+      return some(t2.get) && some(t2.give) && E.tradeValid(g, t2) && evalTrade(g, t2) ? t2 : null;
+    }
+    const out = [];
+    const base = norm(cp(t));
+    const c1 = settle(cp(base));
+    if (c1) out.push({ kind: 'cash', label: 'Jen peníze', t: c1 });
+    const human = t.a;
+    const cands = [
+      ...E.ownedStates(g, human).filter(s => !base.give.states.includes(s)).map(s => ({ states: [s], cards: [] })),
+      ...Object.keys(g.cards).filter(c => g.cards[c].owner === human && g.cards[c].mode === 'own' && !base.give.cards.includes(c)).map(c => ({ states: [], cards: [c] })),
+    ];
+    const opts = [];
+    cands.forEach(c => {
+      const t2 = cp(base); t2.give.states.push(...c.states); t2.give.cards.push(...c.cards);
+      const r = settle(t2);
+      if (r) opts.push({ r, cost: r.give.cash - r.get.cash * 0.5, v: val(c) });
+    });
+    opts.sort((x, y) => x.cost - y.cost || x.v - y.v);
+    opts.slice(0, 2).forEach(o => out.push({ kind: 'asset', label: 'Peníze + majetek', t: o.r }));
+    return out;
+  }
+
+  const AI = { act, evalTrade, counterTrade, startActions, _dbg: { regimeRate, netStateValue, FED_LOOPS: () => FED_LOOPS, CROSS_LEN: () => CROSS_LEN, routeModel } };
   if (typeof module !== 'undefined') module.exports = AI;
   root.AI = AI;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -1739,18 +1781,44 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   function Mock() {
     const KEY = 'immigrants-mockdb';
     const bc = 'BroadcastChannel' in window ? new BroadcastChannel('immigrants-mockdb') : null;
-    const read = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } };
     const parts = p => p.split('/').filter(Boolean);
-    const getAt = (o, p) => parts(p).reduce((a, k) => (a == null ? null : a[k] == null ? null : a[k]), o);
     const clean = v => (v === undefined ? null : JSON.parse(JSON.stringify(v)));
+    // data rozdělená po větvích (games/KÓD/část) – souběžné zápisy z více oken se nepřepisují
+    const skeys = () => Object.keys(localStorage).filter(k => k.startsWith(KEY + ':'));
+    function read() {
+      const root = {};
+      skeys().forEach(k => {
+        let v; try { v = JSON.parse(localStorage.getItem(k)); } catch (e) { return; }
+        const ks = k.slice(KEY.length + 1).split('/'); let o = root;
+        ks.slice(0, -1).forEach(x => { o[x] = o[x] || {}; o = o[x]; }); o[ks[ks.length - 1]] = v;
+      });
+      return root;
+    }
+    const getAt = (o, p) => parts(p).reduce((a, k) => (a == null ? null : a[k] == null ? null : a[k]), o);
+    function writeShard(sh, v) { if (v == null) localStorage.removeItem(KEY + ':' + sh); else localStorage.setItem(KEY + ':' + sh, JSON.stringify(v)); }
     function setAt(p, v) {
-      const root = read(); const ks = parts(p); let o = root;
-      ks.slice(0, -1).forEach(k => { if (typeof o[k] !== 'object' || o[k] == null) o[k] = {}; o = o[k]; });
-      if (v == null) delete o[ks[ks.length - 1]]; else o[ks[ks.length - 1]] = clean(v);
-      localStorage.setItem(KEY, JSON.stringify(root));
+      const ks = parts(p); v = clean(v);
+      if (ks.length >= 3) {
+        const sh = ks.slice(0, 3).join('/');
+        if (ks.length === 3) writeShard(sh, v);
+        else {
+          let root; try { root = JSON.parse(localStorage.getItem(KEY + ':' + sh)); } catch (e) { root = null; }
+          if (typeof root !== 'object' || root == null) root = {};
+          let o = root; const rest = ks.slice(3);
+          rest.slice(0, -1).forEach(k => { if (typeof o[k] !== 'object' || o[k] == null) o[k] = {}; o = o[k]; });
+          if (v == null) delete o[rest[rest.length - 1]]; else o[rest[rest.length - 1]] = v;
+          writeShard(sh, root);
+        }
+      } else {
+        const pre = ks.join('/');
+        skeys().filter(k => (k.slice(KEY.length + 1) + '/').startsWith(pre + '/')).forEach(k => localStorage.removeItem(k));
+        const walk = (val, path) => { if (path.length === 3 || typeof val !== 'object' || val == null) writeShard(path.join('/'), val); else Object.keys(val).forEach(k => walk(val[k], path.concat(k))); };
+        if (v != null) walk(v, ks);
+      }
       if (bc) bc.postMessage(1);
       setTimeout(notify, 0);
     }
+    window.__mockRead = read;
     const listeners = [];
     function notify() {
       const root = read();
@@ -1761,10 +1829,11 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
       });
     }
     if (bc) bc.onmessage = notify;
-    window.addEventListener('storage', e => { if (e.key === KEY) notify(); });
+    window.addEventListener('storage', e => { if (e.key && e.key.startsWith(KEY)) notify(); });
     const snap = (p, v) => ({ key: parts(p).pop(), val: () => clean(v), exists: () => v != null });
     let n = 0;
     function ref(path) {
+      if (path === '.info/connected') return { on: (t, cb) => { setTimeout(() => cb(snap(path, true)), 0); return cb; }, off: () => {} };
       return {
         child: k => ref(path + '/' + k),
         set: v => { setAt(path, v); return Promise.resolve(); },
@@ -2192,6 +2261,8 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     }
     if (isHuman(i) && !isMine(i)) {
       P.append(header(i, `Na tahu: ${pl(i).name}`, 'Hraje na svém zařízení'), h('div', { class: 'thinking' }, h('div', { class: 'spinner' }), h('span', null, describePending(pd))));
+      const st = ON && ON.seats && ON.seats[i];
+      if (ON && ON.host && st && st.on === false) P.append(h('p', { class: 'note' }, `${pl(i).name} je odpojen.`), h('div', { class: 'row' }, h('button', { class: 'btn soft', onclick: () => confirmBox(`Má za hráče ${pl(i).name} dál hrát počítač? Po návratu se hráč do hry zase vrátí.`, 'Hrát počítačem', () => metaAct('toAI', i)) }, 'Hrát za něj počítačem')));
       return;
     }
     if (!isHuman(i)) {
@@ -2521,17 +2592,57 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   }
 
   // ---------- obchod mezi hráči ----------
-  function openTrade(i) {
+  // ---------- obchod ----------
+  const tkey = (a, b) => Math.min(a, b) + '-' + Math.max(a, b);
+  const tradeBlocked = (a, b) => !!(G.tradeBlock && G.tradeBlock[tkey(a, b)] === G.turn);
+  const tdesc = side => [...(side.states || []), ...(side.cards || []).map(c => E.CARDS[c].name), side.cash ? fmt(side.cash) : null].filter(Boolean).join(', ') || 'nic';
+  const flip = t => ({ a: t.b, b: t.a, give: t.get, get: t.give });
+  // odmítnutí: obchod mezi dvojicí je možný až v dalším kole
+  function declineTrade(t) { metaAct('tradeBlock', t.a, t.b); }
+  // nabídka čeká na odpověď hráče t.b (na tomto zařízení)
+  function offerSheet(t, onAnswer) {
+    sheet(`${pl(t.b).name}, přijímáte obchod?`, (bb, cl2) => {
+      bb.append(h('p', null, h('b', null, pl(t.a).name), ' nabízí: ', tdesc(t.give)), h('p', null, 'a chce od vás: ', tdesc(t.get)));
+      if (!E.tradeValid(G, t)) bb.append(h('p', { class: 'err' }, 'Obchod už není platný (změnil se majetek nebo hotovost).'));
+      bb.append(h('div', { class: 'col' },
+        h('button', { class: 'btn red', disabled: !E.tradeValid(G, t), onclick: () => { cl2(); if (onAnswer) onAnswer('yes'); runSide(E.doTrade(G, t)); } }, 'Přijmout'),
+        h('button', { class: 'btn soft', onclick: () => { cl2(); if (onAnswer) onAnswer('counter'); openTrade(t.b, { partner: t.a, preset: flip(t), counter: true }); } }, 'Odmítnout s protinávrhem'),
+        h('button', { class: 'btn ghost', onclick: () => { cl2(); if (onAnswer) onAnswer('no'); declineTrade(t); toast('Obchod odmítnut. Další nabídka mezi vámi až v příštím kole.'); } }, 'Odmítnout')));
+    });
+  }
+  // počítač odmítl – ukáže jeho protinávrhy
+  function aiCounterSheet(t) {
+    const cs = AI.counterTrade(G, t);
+    sheet(`${pl(t.b).name}: protinávrh`, (b, close) => {
+      b.append(h('p', { style: 'margin:0' }, cs.length ? 'Vaši nabídku odmítá, ale přijal by některou z těchto variant:' : 'Vaši nabídku odmítá a žádný protinávrh nemá.'));
+      cs.forEach(c => {
+        const ok = E.tradeValid(G, c.t);
+        b.append(h('div', { class: 'item', style: 'display:block' },
+          h('b', null, c.label),
+          h('p', { style: 'margin:4px 0' }, `Dáte: ${tdesc(c.t.give)}`), h('p', { style: 'margin:0 0 6px' }, `Dostanete: ${tdesc(c.t.get)}`),
+          h('button', { class: 'btn red', disabled: !ok, onclick: () => { close(); runSide(E.doTrade(G, c.t)); toast(`${pl(t.b).name} přijímá obchod.`, 'plus'); } }, 'Přijmout tuto variantu')));
+      });
+      b.append(h('button', { class: 'btn ghost', onclick: () => { close(); declineTrade(t); toast('Další obchod s tímto hráčem až v příštím kole.'); } }, 'Odmítnout'));
+    });
+  }
+  function openTrade(i, o) {
+    o = o || {};
     const others = G.players.filter(p => p.alive && p.id !== i);
     if (!others.length) return;
-    let b2 = others[0].id;
-    const sel = { give: { states: new Set(), cards: new Set(), cash: 0 }, get: { states: new Set(), cards: new Set(), cash: 0 } };
-    sheet('Obchod s hráčem', (b, close) => {
+    const free = others.filter(p => !tradeBlocked(i, p.id));
+    if (!free.length && !o.partner) { toast('S ostatními hráči lze obchodovat až v příštím kole.', 'minus'); return; }
+    let b2 = o.partner != null ? o.partner : free[0].id;
+    const mk = side => ({ states: new Set(side ? side.states || [] : []), cards: new Set(side ? side.cards || [] : []), cash: side ? side.cash || 0 : 0 });
+    const sel = { give: mk(o.preset && o.preset.give), get: mk(o.preset && o.preset.get) };
+    sheet(o.counter ? 'Protinávrh' : 'Obchod s hráčem', (b, close) => {
       const draw = () => {
         b.innerHTML = '';
-        const ps = h('select', { id: 'tradePartner', 'aria-label': 'Partner', onchange: e => { b2 = +e.target.value; sel.get = { states: new Set(), cards: new Set(), cash: 0 }; draw(); } },
-          others.map(p => h('option', { value: p.id, selected: p.id === b2 }, p.name + (p.ai ? ' (počítač)' : ''))));
-        b.append(h('label', { class: 'fl' }, 'Obchodní partner', ps));
+        if (o.counter) b.append(h('p', { class: 'note', style: 'margin:0' }, `Upravte nabídku a pošlete ji zpět hráči ${pl(b2).name}.`));
+        else {
+          const ps = h('select', { id: 'tradePartner', 'aria-label': 'Partner', onchange: e => { b2 = +e.target.value; sel.get = mk(); draw(); } },
+            others.map(p => h('option', { value: p.id, selected: p.id === b2, disabled: tradeBlocked(i, p.id) }, p.name + (p.ai ? ' (počítač)' : '') + (tradeBlocked(i, p.id) ? ' – až příští kolo' : ''))));
+          b.append(h('label', { class: 'fl' }, 'Obchodní partner', ps));
+        }
         const side = (who, key, title) => {
           const box = h('div', { style: 'display:flex;flex-direction:column;gap:6px' }, h('div', { class: 'sec' }, title));
           E.ownedStates(G, who).forEach(s => {
@@ -2551,21 +2662,14 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
           const t = { a: i, b: b2, give: { states: [...sel.give.states], cards: [...sel.give.cards], cash: sel.give.cash }, get: { states: [...sel.get.states], cards: [...sel.get.cards], cash: sel.get.cash } };
           if (!t.give.states.length && !t.give.cards.length && !t.give.cash && !t.get.states.length && !t.get.cards.length && !t.get.cash) { toast('Vyberte, co se má vyměnit.', 'minus'); return; }
           if (!E.tradeValid(G, t)) { toast('Obchod není platný (zkontrolujte hotovost).', 'minus'); return; }
+          close();
           if (pl(b2).ai) {
-            if (AI.evalTrade(G, t)) { runSide(E.doTrade(G, t)); toast(`${pl(b2).name} přijímá obchod.`, 'plus'); close(); }
-            else toast(`${pl(b2).name} nabídku odmítá.`, 'minus');
-          } else if (ON && !isMine(b2)) {
-            close(); sendOffer(t);
-          } else {
-            close();
-            sheet(`${pl(b2).name}, přijímáte obchod?`, (bb, cl2) => {
-              const desc = side2 => [...side2.states, ...side2.cards.map(c => E.CARDS[c].name), side2.cash ? fmt(side2.cash) : null].filter(Boolean).join(', ') || 'nic';
-              bb.append(h('p', null, h('b', null, pl(i).name), ' nabízí: ', desc(t.give)), h('p', null, 'a chce od vás: ', desc(t.get)),
-                h('div', { class: 'row' }, h('button', { class: 'btn red', onclick: () => { runSide(E.doTrade(G, t)); cl2(); } }, 'Přijmout'), h('button', { class: 'btn ghost', onclick: () => { toast('Obchod odmítnut.'); cl2(); } }, 'Odmítnout')));
-            });
-          }
-        } }, 'Navrhnout obchod'));
-        b.append(h('p', { class: 'note' }, 'Vyměněný stát musí nový majitel znovu legalizovat průjezdem bankou FED. Zapůjčené karty (Chief, Commander, Mafia) obchodovat nelze.'));
+            if (AI.evalTrade(G, t)) { runSide(E.doTrade(G, t)); toast(`${pl(b2).name} přijímá obchod.`, 'plus'); }
+            else aiCounterSheet(t);
+          } else if (ON && !isMine(b2)) sendOffer(t);
+          else offerSheet(t);
+        } }, o.counter ? 'Poslat protinávrh' : 'Navrhnout obchod'));
+        b.append(h('p', { class: 'note' }, 'Vyměněný stát musí nový majitel znovu legalizovat průjezdem bankou FED. Zapůjčené karty (Chief, Commander, Mafia) obchodovat nelze. Po odmítnutí lze mezi stejnými hráči obchodovat až v příštím kole.'));
       };
       draw();
     });
@@ -2577,7 +2681,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
       b.append(h('button', { class: 'btn soft', onclick: () => { close(); openRules(); } }, 'Pravidla a manuál'));
       b.append(h('button', { class: 'btn soft', onclick: () => { close(); openLog(); } }, 'Záznam hry'));
       b.append(h('button', { class: 'btn soft', onclick: () => { fast = !fast; close(); renderPanel(); toast(fast ? 'Tahy počítače jsou zrychlené.' : 'Normální rychlost.'); } }, fast ? 'Normální rychlost počítače' : 'Zrychlit tahy počítače'));
-      b.append(h('button', { class: 'btn red', onclick: () => { close(); confirmBox(ON ? 'Opustit online hru? Na tomto zařízení se hra ukončí.' : 'Ukončit rozehranou hru a začít novou?', ON ? 'Opustit' : 'Nová hra', () => { if (ON) leaveOnline(true); else clearSave(); showSetup(); }); } }, ON ? 'Opustit online hru' : 'Nová hra'));
+      b.append(h('button', { class: 'btn red', onclick: () => { close(); confirmBox(ON ? 'Opustit online hru? Na tomto zařízení se hra ukončí.' : 'Ukončit rozehranou hru a začít novou?', ON ? 'Opustit' : 'Nová hra', () => { if (ON) quitOnline(); else clearSave(); showSetup(); }); } }, ON ? 'Opustit online hru' : 'Nová hra'));
       if (ON) b.append(h('p', { class: 'note' }, `Online hra ${ON.code} · ${ON.host ? 'jste zakladatel – vaše zařízení řídí hru' : 'připojeno k zakladateli'}`));
     });
   }
@@ -2725,6 +2829,13 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
       card.innerHTML = '';
       if (BETA) card.append(h('div', { class: 'betabar' }, h('b', null, 'BETA'), h('span', null, 'Zkušební verze pro ladění cen. Hry a nastavení se ukládají odděleně od originálu.')));
       card.append(h('h1', { class: 'sr-only' }, 'Immigrants to the United States of America'), h('p', { class: 'lead' }, 'Desková hra pro 2–7 hráčů na jednom zařízení. Kupujte státy, vybírejte mýtné a dojeďte do banky.'));
+      if (ON && ON.gone) {
+        card.append(h('div', { class: 'gonebox' }, h('b', null, ON.goneLeft ? `Zakladatel opustil online hru ${ON.code}.` : `Zakladatel online hry ${ON.code} je odpojen.`),
+          h('p', null, 'Hru můžete převzít – vaše zařízení ji pak bude řídit a za zakladatele bude hrát počítač, dokud se nevrátí.'),
+          h('button', { class: 'btn red big', onclick: () => takeOver() }, 'Převzít hru'),
+          !ON.goneLeft ? h('button', { class: 'btn soft', onclick: () => { ON.gone = false; startGame(ON.lastG); } }, 'Počkat na zakladatele') : null,
+          h('button', { class: 'btn ghost', onclick: () => { quitOnline(); showSetup(); } }, 'Opustit online hru')));
+      }
       if (saved && saved.pending && saved.pending.type !== 'over') {
         card.append(h('button', { class: 'btn red big', onclick: () => startGame(saved) }, h('span', null, 'Pokračovat v rozehrané hře', h('small', null, `Kolo ${saved.turn} · ${saved.players.filter(p => p.alive).map(p => p.name).join(', ')}`))));
         card.append(h('div', { class: 'sec' }, 'nebo nová hra'));
@@ -2753,12 +2864,13 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
       if (victory === 'states') card.append(h('label', { class: 'fl' }, 'Cílový počet států', h('input', { id: 'tstates', type: 'number', min: 3, max: 49, value: targetStates, style: 'border:2px solid var(--paper-3);border-radius:8px;padding:9px;font:16px var(--f-body)', oninput: e => { targetStates = +e.target.value || 15; } })));
       card.append(h('button', { class: 'btn red big', onclick: () => {
         const ps = setupPlayers.map((p, k) => ({ name: (p.name || '').trim() || (p.ai ? 'Počítač ' : 'Hráč ') + (k + 1), ai: p.ai, color: p.color, level: p.ai ? ({ 1: 1, 2: 2, 3: 4 })[aiLevel] : 1 }));
+        if (ON) quitOnline();
         clearSave();
         if (BETA) applyConf(loadConf());
         const ng = E.newGame(ps, { targetCash: victory === 'cash' ? target : 0, targetStates: victory === 'states' ? targetStates : 0 });
         if (BETA) ng.conf = loadConf();
         startGame(ng);
-      } }, 'Začít hru'));
+      } }, ONLINE_OK ? 'Založit offline hru' : 'Začít hru'));
       if (BETA) card.append(h('button', { class: 'btn ghost', onclick: openConf }, 'Upravit ceny a pravidla (beta)'));
       if (ONLINE_OK) {
         card.append(h('div', { class: 'sec' }, 'Online hra – každý na svém zařízení'));
@@ -2902,12 +3014,24 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
       localStorage.setItem(ON_KEY, JSON.stringify(o));
     } catch (e) { /* nic */ }
   }
+  // akce mimo engine (řídí je hostitel, offline se provedou hned)
+  const META = {
+    tradeBlock(g, a, b) { g.tradeBlock = g.tradeBlock || {}; g.tradeBlock[tkey(a, b)] = g.turn; return { ok: true, out: [] }; },
+    toAI(g, i) { const p = g.players[i]; if (!p || p.ai) return { ok: false }; p.ai = true; p.level = (ON && ON.level) || 4; return { ok: true, out: [{ t: 'msg', text: `Za hráče ${p.name} teď hraje počítač.` }] }; },
+    reclaim(g, i) { const p = g.players[i]; if (!p || !p.ai) return { ok: false }; p.ai = false; return { ok: true, out: [{ t: 'msg', text: `${p.name} se vrátil do hry.` }] }; },
+  };
+  function metaAct(fn, ...args) {
+    if (ON && !ON.host) { sendAction(fn, args, true); return; }
+    const r = META[fn](G, ...args);
+    if (r && r.ok) { commit(r.out); (r.out || []).forEach(e => e.text && toast(e.text)); refresh(); }
+  }
   function useRemoteEngine(on) {
     MUT.forEach(k => { E[k] = on ? (g, ...args) => { sendAction(k, args); return { ok: true, out: [] }; } : ENG[k]; });
   }
   function leaveOnline(forget) {
     if (!ON) return;
-    try { ['state', 'actions', 'offer', 'err', 'seats', 'meta', 'conf'].forEach(p => gref(p).off()); } catch (e) { /* nic */ }
+    try { ['state', 'actions', 'offer', 'err', 'seats', 'meta', 'meta/status', 'conf'].forEach(p => gref(p).off()); (ON.pres || []).forEach(r => r.off()); } catch (e) { /* nic */ }
+    clearTimeout(ON.goneT); clearTimeout(ON.waitT);
     useRemoteEngine(false);
     if (forget) try { localStorage.removeItem(ON_KEY); } catch (e) { /* nic */ }
     ON = null;
@@ -2915,6 +3039,66 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
   async function netStart() {
     try { await Net.start(); return true; }
     catch (e) { console.warn(e); alertBox('Nepodařilo se připojit k online službě. Zkontrolujte připojení k internetu a zkuste to znovu.'); return false; }
+  }
+  function presence(path) {
+    const r = Net.ref(path);
+    ON.pres = ON.pres || [];
+    const c = Net.ref('.info/connected');
+    c.on('value', s => { if (s.val() && ON) { r.onDisconnect().set(false); r.set(true); } });
+    ON.pres.push(c);
+  }
+  function quitOnline() {
+    if (!ON) return;
+    if (ON.host) gref('meta/status').set('abandoned');
+    else { const k = [...ON.mine][0]; if (G && pl(k) && !pl(k).ai) sendAction('toAI', [k], true); gref('seats/' + k + '/on').set(false); }
+    leaveOnline(true);
+  }
+  function watchHost() {
+    gref('meta').on('value', s => {
+      const m = s.val(); if (!ON || !m) return;
+      if (ON.host) {
+        if (m.host && m.host !== ON.uid) demote();
+        return;
+      }
+      if (m.host !== ON.hostUid) { ON.hostUid = m.host; ON.gone = false; clearTimeout(ON.goneT); }
+      if (m.status === 'cancel' && !G) { leaveOnline(true); alertBox('Zakladatel hru zrušil.'); showSetup(); return; }
+      if (!G || ON.gone) return;
+      if (m.status === 'abandoned') hostGone(true);
+      else if (m.hostOn === false) { clearTimeout(ON.goneT); ON.goneT = setTimeout(() => hostGone(false), 12000); }
+      else clearTimeout(ON.goneT);
+    });
+  }
+  function hostGone(left) {
+    if (!ON || ON.host || ON.gone || !G) return;
+    ON.gone = true; ON.goneLeft = left; ON.lastG = G;
+    showSetup();
+  }
+  async function takeOver() {
+    const uid = ON.uid;
+    const r = await gref('meta').transaction(m => (m == null ? null : (m.status === 'abandoned' || m.hostOn === false) && m.host !== uid ? Object.assign({}, m, { host: uid, status: 'play', hostOn: true }) : undefined));
+    if (!r.committed || !r.snapshot.val() || r.snapshot.val().host !== uid) { toast('Hru už převzal někdo jiný, nebo se zakladatel vrátil.', 'minus'); ON.gone = false; startGame(ON.lastG); return; }
+    const seats = (await gref('seats').get()).val() || [];
+    const g = ON.lastG; if (ON.conf) g.conf = ON.conf;
+    ['state', 'err', 'offer', 'conf', 'meta'].forEach(p => gref(p).off());
+    useRemoteEngine(false);
+    ON.host = true; ON.gone = false; ON.seats = seats;
+    const old = seats.findIndex(st => st && st.uid === ON.hostUid);
+    hostListen();
+    presence(`games/${ON.code}/meta/hostOn`);
+    startGame(g);
+    if (old >= 0 && pl(old) && !pl(old).ai) metaAct('toAI', old);
+    else commit([]);
+    toast('Převzal jste hru – vaše zařízení ji teď řídí.', 'plus', 4000);
+  }
+  function demote() {
+    // někdo převzal hru, zatímco jsme byli pryč – pokračujeme jako připojený hráč
+    if (!ON || !ON.host) return;
+    ['actions', 'offer', 'meta'].forEach(p => gref(p).off());
+    ON.host = false; ON.seq = -1; ON.inbox = [];
+    useRemoteEngine(true);
+    clientListen();
+    toast('Hru mezitím převzal jiný hráč. Pokračujete jako připojený hráč.', '', 4500);
+    const k = [...ON.mine][0]; if (G && pl(k) && pl(k).ai) metaAct('reclaim', k);
   }
   // ---------- hostitel ----------
   function commit(out) {
@@ -2931,6 +3115,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     gref('seats').on('value', s => { ON.seats = s.val() || []; });
     gref('actions').on('child_added', s => { ON.queue.push(Object.assign({ key: s.key }, s.val())); hostPump(); });
     gref('offer').on('value', s => onOffer(s.val()));
+    watchHost();
   }
   async function hostPump() {
     if (!ON || !ON.host || busy || ON.pumping || !G) return;
@@ -2942,8 +3127,10 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
         let args = []; try { args = JSON.parse(a.args); } catch (e) { continue; }
         const seat = a.seat, st = (ON.seats || [])[seat];
         const who = a.fn === 'doTrade' ? [args[0] && args[0].a, args[0] && args[0].b] : [args[0]];
-        const okSeat = st && st.uid === a.uid && pl(seat) && !pl(seat).ai && who.includes(seat);
-        let r = okSeat && ENG[a.fn] ? ENG[a.fn](G, ...args) : { ok: false, err: 'Tah nebyl přijat.' };
+        const fnc = ENG[a.fn] || META[a.fn];
+        if (a.fn === 'tradeBlock') who.push(args[1]);
+        const okSeat = st && st.uid === a.uid && pl(seat) && (a.fn === 'reclaim' || !pl(seat).ai) && who.includes(seat);
+        let r = okSeat && fnc ? fnc(G, ...args) : { ok: false, err: 'Tah nebyl přijat.' };
         if (r === true) r = { ok: true, out: [] }; else if (r === false) r = { ok: false };
         if (!r || !r.ok) { gref('err').set({ seat, text: (r && r.err) || 'Akci nelze provést.', t: Date.now() }); commit([]); continue; }
         commit(r.out || []);
@@ -2953,9 +3140,9 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     } finally { if (ON) ON.pumping = false; }
   }
   // ---------- připojený hráč ----------
-  function sendAction(fn, args) {
+  function sendAction(fn, args, noWait) {
     if (!ON) return;
-    ON.wait = true;
+    if (!noWait) ON.wait = true;
     gref('actions').push({ uid: ON.uid, seat: [...ON.mine][0], fn, args: JSON.stringify(args), t: Date.now() });
     clearTimeout(ON.waitT);
     ON.waitT = setTimeout(() => { if (ON && ON.wait) { ON.wait = false; toast('Zakladatel hry neodpovídá – je připojen?', 'minus', 4000); if (G) renderPanel(); } }, 15000);
@@ -2967,6 +3154,8 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     ON.errInit = false;
     gref('err').on('value', s => { const v = s.val(); if (!ON.errInit) { ON.errInit = true; return; } if (v && ON && ON.mine.has(v.seat)) { ON.wait = false; toast(v.text, 'minus'); if (G) renderPanel(); } });
     gref('offer').on('value', s => onOffer(s.val()));
+    watchHost();
+    presence(`games/${ON.code}/seats/${[...ON.mine][0]}/on`);
   }
   async function clientPump() {
     if (!ON || ON.host || busy || ON.pumping) return;
@@ -2980,11 +3169,14 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
         g.log = ((G && G.log) || []).concat(tail).slice(-200);
         if (ON.conf) g.conf = ON.conf;
         const first = !G || ON.seq < 0;
+        if (first) ON.gone = false;
         ON.seq = v.seq; ON.wait = false; clearTimeout(ON.waitT);
         if (first) {
           if (!ON.conf) { try { ON.conf = JSON.parse((await gref('conf').get()).val()); } catch (e) { /* nic */ } }
           if (ON.conf) g.conf = ON.conf;
-          startGame(g); continue;
+          startGame(g);
+          const k = [...ON.mine][0]; if (G.players[k] && G.players[k].ai) metaAct('reclaim', k);
+          continue;
         }
         G = g;
         await play(JSON.parse(v.out || '[]'));
@@ -2993,20 +3185,22 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     } finally { if (ON) ON.pumping = false; }
   }
   // ---------- obchod mezi zařízeními ----------
-  function sendOffer(t) { gref('offer').set({ t: JSON.stringify(t), id: Date.now() }); toast(`Nabídka odeslána hráči ${pl(t.b).name}.`); }
+  function sendOffer(t) { gref('offer').set({ t: JSON.stringify(t), id: Date.now() + '-' + ON.uid }); toast(`Nabídka odeslána hráči ${pl(t.b).name}.`); }
   function onOffer(o) {
     if (!ON || !o || !G) return;
     let t; try { t = JSON.parse(o.t); } catch (e) { return; }
-    if (o.answer) { if (ON.mine.has(t.a) && ON.lastAns !== o.id) { ON.lastAns = o.id; gref('offer').remove(); toast(o.answer === 'yes' ? `${pl(t.b).name} přijímá obchod.` : `${pl(t.b).name} nabídku odmítá.`, o.answer === 'yes' ? 'plus' : 'minus'); } return; }
+    if (o.answer) {
+      if (ON.mine.has(t.a) && ON.lastAns !== o.id) {
+        ON.lastAns = o.id; gref('offer').remove();
+        if (o.answer === 'yes') toast(`${pl(t.b).name} přijímá obchod.`, 'plus');
+        else if (o.answer === 'no') toast(`${pl(t.b).name} nabídku odmítá. Další obchod až v příštím kole.`, 'minus');
+        else toast(`${pl(t.b).name} připravuje protinávrh…`);
+      }
+      return;
+    }
     if (!ON.mine.has(t.b) || ON.seenOffer === o.id) return;
     ON.seenOffer = o.id;
-    const desc = side2 => [...(side2.states || []), ...(side2.cards || []).map(c => E.CARDS[c].name), side2.cash ? fmt(side2.cash) : null].filter(Boolean).join(', ') || 'nic';
-    sheet(`${pl(t.b).name}, přijímáte obchod?`, (bb, cl2) => {
-      bb.append(h('p', null, h('b', null, pl(t.a).name), ' nabízí: ', desc(t.give)), h('p', null, 'a chce od vás: ', desc(t.get)),
-        h('div', { class: 'row' },
-          h('button', { class: 'btn red', onclick: () => { gref('offer').update({ answer: 'yes' }); runSide(E.doTrade(G, t)); cl2(); } }, 'Přijmout'),
-          h('button', { class: 'btn ghost', onclick: () => { gref('offer').update({ answer: 'no' }); toast('Obchod odmítnut.'); cl2(); } }, 'Odmítnout')));
-    });
+    offerSheet(t, ans => gref('offer').update({ answer: ans }));
   }
   // ---------- lobby ----------
   function shareLink(code) { return location.origin + location.pathname + '?hra=' + code; }
@@ -3019,6 +3213,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     throw new Error('kód');
   }
   async function createOnline(cfg) {
+    if (ON) quitOnline();
     const hostSeat = cfg.ps.findIndex(p => !p.ai);
     if (hostSeat < 0) { alertBox('Nastavte alespoň jednoho hráče jako „Člověk“ – to budete vy.'); return; }
     if (cfg.ps.filter(p => !p.ai).length < 2) { alertBox('Pro online hru nastavte alespoň dva hráče jako „Člověk“. První z nich jste vy, ostatní se připojí ze svých zařízení.'); return; }
@@ -3076,13 +3271,16 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     const snap = await Net.ref('games/' + os.code).get();
     if (!snap.exists()) { toast('Online hra už neexistuje.', 'minus'); try { localStorage.removeItem(ON_KEY); } catch (e) { /* nic */ } showSetup(); return false; }
     const gm = snap.val();
+    if (os.host && gm.meta.host !== Net.uid) os = { code: os.code, host: false };
     if (os.host) {
       const seats = gm.seats || [];
       ON = { code: os.code, host: true, uid: Net.uid, mine: new Set([seats.findIndex(s => s && s.uid === Net.uid)]), seq: 0, seats };
       if (gm.state && gm.state.seq) ON.seq = gm.state.seq;
       onlineSave();
       if (gm.meta.status === 'lobby' || !os.g) { showLobby(); return true; }
+      ON.level = gm.meta.level;
       hostListen();
+      presence(`games/${ON.code}/meta/hostOn`);
       startGame(os.g);
       commit([]);
       return true;
@@ -3122,10 +3320,7 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
           h('span', { class: 'tag' }, st.ai ? 'počítač' : st.uid ? 'připojen' : 'čeká na hráče…')));
       });
     });
-    if (!ON.host) gref('meta/status').on('value', s => {
-      const st = s.val();
-      if (st === 'cancel' && ON && !G) { leaveOnline(true); alertBox('Zakladatel hru zrušil.'); showSetup(); }
-    });
+
   }
   async function hostStart() {
     const gm = (await gref().get()).val();
@@ -3138,7 +3333,10 @@ if(typeof module!=="undefined")module.exports=(typeof window!=="undefined"?windo
     seats.forEach((st, k) => { if (!st.ai && !st.uid) gref('seats/' + k).update({ ai: true }); });
     gref('seats').off(); gref('meta/status').off();
     await gref('meta/status').set('play');
+    ON.level = gm.meta.level;
     hostListen();
+    presence(`games/${ON.code}/meta/hostOn`);
+    presence(`games/${ON.code}/seats/${[...ON.mine][0]}/on`);
     startGame(ng);
     commit([]);
   }
